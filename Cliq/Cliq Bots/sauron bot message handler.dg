@@ -1,0 +1,171 @@
+/*
+	name: Sauron bot 
+    purpose: to retreive an account's data and its contacts data, its latest deal and other related information by a simple search and readable format. the name Sauron is chosen for the bot as it looks for the data.
+	hanlder: message handler (please copy this code under the message handler folder in your bot)
+	input: account name hint or the account number (you can replace the account number with a custom field you use to identify the accounts)
+	output: retreived data from the CRM in a readable format.
+*/
+crm_connection_name = "xxxxxx"; //please enter your crm connection name here. 
+response = Map();
+text = "";
+//users input can be either the account name or the account number if the input is a number. we will look into the account number first and if not then we will look into the account names.
+if(isNumber(message))
+{
+    criteria = "(Account_Number:equals:" + message + ")" ;
+}
+else
+{
+    criteria = "(Account_Name:starts_with:" + message + ")" ;
+}
+//since we want to retreive account data and related data to it we have to make several api calls, we are bundling them together into one composite api call.
+//params1: in the first api call we are searching for the account and in the rest of them we are fetching the related lists
+params1 = { "criteria": criteria}; 
+//params2: in the second api call we are fetching the child accounts data
+params2 = { "fields": "Account_Name,Account_Number" };
+//params3: in the third api call we are fetching the contacts data and in the fields key we are entering the api name of the fields we want to fetch
+params3 = { "fields": "First_Name,Last_Name,Mobile,Email" };
+//params4: in the fourth api call we are fetching the latest call history and in the fields key we are entering the api name of the fields we want to fetch
+params4 = { "fields": "Created_By,Description,Created_Time", "per_page" : "3"};
+//params5: in the fifth api call we are fetching the latest deal and in the fields key we are entering the api name of the fields we want to fetch and we explicitly set the per_page to 1 to retreive only the latest deal
+params5 = { "fields": "Deal_Name", "per_page" : "1"};
+requests = list();
+requests.add({"sub_request_id":"1", "uri": "/crm/v3/Accounts/search", "params": params1, "method":"GET"});
+requests.add({"sub_request_id":"2", "uri": "/crm/v3/Accounts/@{1:$.data[0].id}/Child_Accounts", "params":params2, "method":"GET" });
+requests.add({"sub_request_id":"3", "uri": "/crm/v3/Accounts/@{1:$.data[0].id}/Contacts", "params":params3,"method":"GET"});
+requests.add({"sub_request_id":"4", "uri": "/crm/v3/Accounts/@{1:$.data[0].id}/Calls_History", "params":params4, "method":"GET" });
+requests.add({"sub_request_id":"5", "uri": "/crm/v3/Accounts/@{1:$.data[0].id}/Deals", "params":params5, "method":"GET" });
+params = { "rollback_on_fail": true, "concurrent_execution" : false, "__composite_requests": requests};
+params = params.tostring();
+composite_api_response = invokeurl
+[
+	url :"https://www.zohoapis.eu/crm/v3/__composite_requests"
+	type : POST
+	parameters: params
+	connection: crm_connection_name
+];
+//after the api call is done we are error checking the response.
+error_msg = "Sorry " + user.get("first_name") + "! I can't find any account like that. :doubt:\n";
+error_msg += "Please enter a valid account number or account name. Give me a hint and I will list accounts with the similar name :smile:\n";
+accounts_response = composite_api_response.get("__composite_requests").get(0);
+if ( accounts_response.get("status") == "error" ) 
+{
+	response.put("text", error_msg);
+	return response;
+}
+if (accounts_response.get("details").get("response").get("status_code") != 200  )
+{
+	response.put("text", error_msg);
+	return response;
+}
+account_count = accounts_response.get("details").get("response").get("body").get("info").get("count");
+if(account_count > 1)
+{
+	//there are more than one account with similar name to what user entered and we are returning the existing options
+	accounts = accounts_response.get("details").get("response").get("body").get("data");
+	for each account in accounts
+	{
+		text += "\n" + account.get("Account_Name");
+	}
+	if(account_count <= 10)
+	{
+		suggestion_list = list();
+		for each account in accounts
+		{
+			suggestion_list.add({"text" : account.get("Account_Number")});
+		}
+		response.put("suggestions", {"list" : suggestion_list });
+	}
+	response.put("text", text);
+	return response;
+}
+//the rest of the code assumes that there is just one account found.
+child_accounts_response = composite_api_response.get("__composite_requests").get(1);
+contacts_response = composite_api_response.get("__composite_requests").get(2);
+calls_response = composite_api_response.get("__composite_requests").get(3);
+deal_response = composite_api_response.get("__composite_requests").get(4);
+//------------------------ account data ------------------------
+account = accounts_response.get("details").get("response").get("body").get("data").get(0);
+text = "```Account Information``` \n";
+text += "*Account Number:* " + account.get("Account_Number") + "\n";
+text += account.get("Account_Name") + "\n";
+//todo: remove all hyper links
+if(!isNull(account.get("Parent_Account")))
+{
+	text += "*Parent Account:* " + account.get("Parent_Account").get("name") + "\n";
+}
+if(child_accounts_response.get("details").get("response").get("status_code") == 200)
+{
+	child_accounts = child_accounts_response.get("details").get("response").get("body").get("data");
+	text += "*Child Account(s):* \n";
+	for each child_account in child_accounts
+	{
+		text += child_account.get("Account_Name") + "     Account Number: " + child_account.get("Account_Number") + "\n";
+	}
+}
+if(!isNull(account.get("Phone")))
+{
+    //the line below takes care of formatting the phone number in a neat way. you have to change +44 with the country code you need.
+    text += "*Phone:* +44 " + phone.getAlphaNumeric().replaceFirst("^(0|440|44)" , "") + "\n";
+}
+if(!isNull(account.get("Website")))
+{
+	text += "*Web:* " + if(matches(account.get("Website"), "^http.*$" ), "", "https://") + account.get("Website") + "\n";
+}
+text += "*Rating:* " + "`" + account.get("Rating") + "` \n";
+//building the address string
+address = ifNull(account.get("Billing_Street"),"");
+address += if(isNull(account.get("Billing_City")), "", ", " + account.get("Billing_City") );
+address += if(isNull(account.get("Billing_State")), "", ", " + account.get("Billing_State") );
+address += if(isNull(account.get("Billing_Code")), "", ", " + account.get("Billing_Code") );
+address += if(isNull(account.get("Billing_Country")), "", ", " + account.get("Billing_Country") );
+text += if(isNull(address), "*Address:*", "[Address:](https://www.google.com/maps?q=" + encodeUrl(address) + ") " + address) + "\n";
+text += if(isNull(account.get("Description")), "", "*Description:* " + account.get("Description") + "\n" );
+//----------------------- contacts data -----------------------
+text += "```Contacts:``` \n";
+if(contacts_response.get("details").get("response").get("status_code") == 200)
+{
+	contacts = contacts_response.get("details").get("response").get("body").get("data");
+	for each contact in contacts
+	{
+		contact_name = ifNull(contact.get("First_Name"), "");
+		contact_name += if(isNull(contact.get("Last_Name")) , "", " " + contact.get("Last_Name"));
+		text += contact_name + "\n";
+        if(!isNull(phone))
+        {
+            //the line below takes care of formatting the phone number in a neat way. you have to change +44 with the country code you need.
+            text += "*Mobile:* +44 " + contact.get("Mobile").getAlphaNumeric().replaceFirst("^(0|440|44)" , "") + "\n";
+        }		
+		text += if(isNull(contact.get("Email")), "\n" , contact.get("Email") + "\n\n");
+	}
+}
+// ---------------------------------- call history data  ----------------------------------
+text += "```Call Hystory:``` \n"; 
+if(calls_response.get("details").get("response").get("status_code") == 200)
+{
+	calls = calls_response.get("details").get("response").get("body").get("data");
+	for each call in calls
+	{
+		text += "*" + call.get("Created_By").get("name") + ":* " + ifNull(call.get("Description"), "") + "\n" ;
+		text += call.get("Created_Time").left(10) + "\n\n" ;
+	}
+}
+if(deal_response.get("details").get("response").get("status_code") == 200)
+{
+	deal_zid = deal_response.get("details").get("response").get("body").get("data").get(0).get("id");
+	api_response_deals = invokeurl
+	[
+		url :"https://www.zohoapis.eu/crm/v3/Deals/" + deal_zid
+		type :GET
+		connection: crm_connection_name
+	];
+	deal = api_response_deals.get("data").get(0);
+	text += "``` Recent Deal:```\n";
+	text += deal.get("Deal_Name") + "\n";
+	text += "*Deal description:* " + deal.get("Description") + "\n\n";
+	text += "*Deal Creator:* " + deal.get("Owner").get("name") + "\n";
+	text += "*Deal Pipeline:* " + deal.get("Pipeline") + "\n";
+	text += "*Deal Stage:* " + deal.get("Stage") + "\n";
+}
+//we have a 4000 character limit for each message in Cliq so if the bot's response exceeds it we have to cut it, otherwise the user will not see anything
+response.put("text",if(text.length() > 4000, text.left(4000), text));
+return response;
